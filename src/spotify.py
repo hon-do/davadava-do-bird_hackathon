@@ -256,7 +256,7 @@ def fade_volume(target: int, steps: int = 10) -> str:
     for i in range(1, steps + 1):
         vol = int(current + step_size * i)
         osascript(f"set sound volume to {vol}")
-        subprocess.run(["sleep", "0.1"])
+        time.sleep(0.1)
 
     osascript(f"set sound volume to {target}")
     return f"Volume faded {current} → {target}"

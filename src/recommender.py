@@ -196,6 +196,15 @@ def recommend_drive_music_for_trip(
         chosen = destination_rec
         reason = f"目的地 {destination} に合わせた選曲"
 
+    # mood が指定されていて目的地も時間もピンとこない場合は mood を優先
+    if mood and not any(
+        k in destination.lower() or destination.lower() in k
+        for k in DRIVE_DESTINATION_MAP
+    ) and duration_minutes < 45:
+        mood_rec = recommend_for_motivation(mood)
+        chosen = mood_rec
+        reason = f"ムード ({mood}) に合わせた選曲"
+
     return Recommendation(
         genre=chosen.genre,
         playlist_uri=chosen.playlist_uri,
