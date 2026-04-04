@@ -180,6 +180,37 @@ def play_playlist(uri: str) -> str:
     return f"Now playing: {current_track_summary()}"
 
 
+def _escape_applescript_string(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def play_playlist_by_name(name: str) -> str:
+    """Play a playlist by name from the user's Spotify library."""
+    escaped = _escape_applescript_string(name.strip())
+    if not escaped:
+        return "Playlist name is empty"
+
+    script = f'''
+tell application "Spotify"
+    try
+        set targetPlaylist to first playlist whose name is "{escaped}"
+        set targetUri to spotify url of targetPlaylist
+        play track targetUri
+        return "Playing playlist: " & (name of targetPlaylist) & " (" & targetUri & ")"
+    on error errMsg
+        return "ERROR: " & errMsg
+    end try
+end tell
+'''
+    result = osascript_raw(script)
+    if result.startswith("ERROR:"):
+        return (
+            f'Could not find playlist "{name}" in your Spotify library. '
+            "Try follow/save the playlist first, or play by Spotify URI."
+        )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Track Info
 # ---------------------------------------------------------------------------
