@@ -5,6 +5,7 @@ VoiceOS からの音声コマンドで Spotify を操作し、
 """
 
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -30,6 +31,7 @@ from spotify import (
     search_and_play_track,
     search_and_play_artist,
     search_and_play_playlist,
+    play_recommended_tracks,
 )
 from recommender import (
     recommend_drive_music,
@@ -40,6 +42,19 @@ from recommender import (
 from maps import get_drive_route_summary, MapsError
 
 mcp = FastMCP("davadava-dj")
+
+
+def _get_time_of_day() -> str:
+    """現在の時間帯を返す。"""
+    hour = datetime.now().hour
+    if 5 <= hour < 11:
+        return "morning"
+    elif 11 <= hour < 17:
+        return "afternoon"
+    elif 17 <= hour < 21:
+        return "evening"
+    else:
+        return "night"
 
 
 # =========================================================================
@@ -155,10 +170,31 @@ def drive_music(destination: str, mood: str = "") -> str:
     Destination types: beach, mountain, city, highway, countryside, night_drive, date.
     Mood examples: high, low, neutral, stressed, excited.
 
-    Use this when the user mentions a general type of drive.
+    Uses your Spotify listening history to personalize recommendations.
+    Also considers the current time of day (night → chill, morning → fresh).
     """
-    rec = recommend_drive_music(destination, mood)
-    result = play_playlist(rec.playlist_uri)
+    time_of_day = _get_time_of_day()
+
+    # 夜間は自動的に night_drive の雰囲気を加味
+    if time_of_day == "night" and destination not in ("night_drive", "date"):
+        destination = "night_drive"
+
+    rec = recommend_drive_music(destination, mood, time_of_day)
+
+    # Recommendations API がトラックを返した場合は直接再生
+    if rec.tracks:
+        result = play_recommended_tracks(
+            seed_genres=None, seed_artists=None, seed_tracks=None,
+            # play_recommended_tracks を直接呼ばず、rec.tracksの最初を再生
+        )
+        from spotify import osascript, current_track_summary
+        import time as _time
+        osascript(f'play track "{rec.tracks[0]["uri"]}"')
+        _time.sleep(1)
+        result = current_track_summary()
+    else:
+        result = play_playlist(rec.playlist_uri)
+
     return f"{rec.description} ({rec.genre})\n{result}"
 
 
@@ -210,8 +246,21 @@ def drive_music_with_route(origin: str, destination: str, mood: str = "") -> str
     except MapsError as exc:
         return f"Route lookup failed: {exc}"
 
-    rec = recommend_drive_music_for_trip(destination, route.duration_minutes, mood)
-    result = play_playlist(rec.playlist_uri)
+    time_of_day = _get_time_of_day()
+    rec = recommend_drive_music_for_trip(
+        destination, route.duration_minutes, mood, time_of_day,
+    )
+
+    # トラック推薦の場合は直接再生
+    if rec.tracks:
+        from spotify import osascript, current_track_summary
+        import time as _time
+        osascript(f'play track "{rec.tracks[0]["uri"]}"')
+        _time.sleep(1)
+        result = current_track_summary()
+    else:
+        result = play_playlist(rec.playlist_uri)
+
     return (
         f"Route: {route.origin} -> {route.destination}\n"
         f"Distance: {route.distance_text}, Time: {route.duration_text}\n"
@@ -234,7 +283,14 @@ def task_music(task: str, motivation: str = "") -> str:
     Use this when the user wants music for working or an activity.
     """
     rec = recommend_task_music(task, motivation)
-    result = play_playlist(rec.playlist_uri)
+    if rec.tracks:
+        from spotify import osascript, current_track_summary
+        import time as _time
+        osascript(f'play track "{rec.tracks[0]["uri"]}"')
+        _time.sleep(1)
+        result = current_track_summary()
+    else:
+        result = play_playlist(rec.playlist_uri)
     return f"{rec.description} ({rec.genre})\n{result}"
 
 
@@ -273,7 +329,14 @@ def mood_music(mood: str) -> str:
     Mood examples: high, low, neutral, stressed, excited.
     """
     rec = recommend_for_motivation(mood)
-    result = play_playlist(rec.playlist_uri)
+    if rec.tracks:
+        from spotify import osascript, current_track_summary
+        import time as _time
+        osascript(f'play track "{rec.tracks[0]["uri"]}"')
+        _time.sleep(1)
+        result = current_track_summary()
+    else:
+        result = play_playlist(rec.playlist_uri)
     return f"{rec.description} ({rec.genre})\n{result}"
 
 
