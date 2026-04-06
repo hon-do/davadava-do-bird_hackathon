@@ -5,10 +5,21 @@ VoiceOS からの音声コマンドで Spotify を操作し、
 """
 
 import subprocess
+import sys
+import logging
 from urllib.parse import urlencode
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+# ログ設定: 全ツール呼び出しを記録
+logging.basicConfig(
+    filename=os.path.join(os.path.dirname(__file__), "dj_server.log"),
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("davadava")
 
 from mcp.server.fastmcp import FastMCP
 
@@ -33,6 +44,7 @@ from spotify import (
     search_and_play_track,
     search_and_play_artist,
     search_and_play_playlist,
+    play_recommended_tracks,
 )
 from recommender import (
     recommend_drive_music,
@@ -52,6 +64,23 @@ from anthropic_eta import (
 from spotify_web import search_spotify_playlists, SpotifySearchError
 
 mcp = FastMCP("davadava-dj")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_time_of_day() -> str:
+    """現在の時間帯を返す。"""
+    hour = datetime.now().hour
+    if 5 <= hour < 11:
+        return "morning"
+    elif 11 <= hour < 17:
+        return "afternoon"
+    elif 17 <= hour < 21:
+        return "evening"
+    else:
+        return "night"
 
 
 def _open_spotify_app() -> str:
@@ -81,6 +110,19 @@ def _open_google_maps_directions(origin: str, destination: str) -> str:
         return f"Google Maps open failed: {exc}"
 
 
+def _play_recommendation(rec) -> str:
+    """Recommendation の内容に応じて再生する共通ヘルパー。"""
+    logger.info(f"_play_recommendation called: genre={rec.genre}, uri={rec.playlist_uri}, tracks={len(rec.tracks)}")
+    if rec.tracks:
+        from spotify import osascript
+        import time as _time
+        osascript(f'play track "{rec.tracks[0]["uri"]}"')
+        _time.sleep(1)
+        return current_track_summary()
+    else:
+        return play_playlist(rec.playlist_uri)
+
+
 # =========================================================================
 # Basic Playback Controls
 # =========================================================================
@@ -88,6 +130,7 @@ def _open_google_maps_directions(origin: str, destination: str) -> str:
 @mcp.tool()
 def resume_playback() -> str:
     """Resume playing music. Use when asked to play or continue music."""
+    logger.info("TOOL CALLED: resume_playback()")
     return play()
 
 
@@ -106,6 +149,7 @@ def toggle_play_pause() -> str:
 @mcp.tool()
 def next_song() -> str:
     """Skip to the next song."""
+    logger.info("TOOL CALLED: next_song()")
     return next_track()
 
 
@@ -194,10 +238,16 @@ def drive_music(destination: str, mood: str = "") -> str:
     Destination types: beach, mountain, city, highway, countryside, night_drive, date.
     Mood examples: high, low, neutral, stressed, excited.
 
-    Use this when the user mentions a general type of drive.
+    Uses your Spotify listening history to personalize recommendations.
+    Also considers the current time of day (night -> chill, morning -> fresh).
     """
-    rec = recommend_drive_music(destination, mood)
-    result = play_playlist(rec.playlist_uri)
+    logger.info(f"TOOL CALLED: drive_music(destination={destination}, mood={mood})")
+    time_of_day = _get_time_of_day()
+    if time_of_day == "night" and destination not in ("night_drive", "date"):
+        destination = "night_drive"
+
+    rec = recommend_drive_music(destination, mood, time_of_day)
+    result = _play_recommendation(rec)
     return f"{rec.description} ({rec.genre})\n{result}"
 
 
@@ -249,8 +299,11 @@ def drive_music_with_route(origin: str, destination: str, mood: str = "") -> str
     except MapsError as exc:
         return f"Route lookup failed: {exc}"
 
-    rec = recommend_drive_music_for_trip(destination, route.duration_minutes, mood)
-    result = play_playlist(rec.playlist_uri)
+    time_of_day = _get_time_of_day()
+    rec = recommend_drive_music_for_trip(
+        destination, route.duration_minutes, mood, time_of_day,
+    )
+    result = _play_recommendation(rec)
     return (
         f"Route: {route.origin} -> {route.destination}\n"
         f"Distance: {route.distance_text}, Time: {route.duration_text}\n"
@@ -316,7 +369,7 @@ def drive_music_with_predicted_time(
         return f"ETA prediction failed: {exc}"
 
     rec = recommend_drive_music_for_trip(destination, estimate.minutes_mid, mood)
-    result = play_playlist(rec.playlist_uri)
+    result = _play_recommendation(rec)
     return (
         f"Prediction: {estimate.minutes_mid} min "
         f"(range {estimate.minutes_low}-{estimate.minutes_high} min)\n"
@@ -334,17 +387,19 @@ def start_drive_session(origin: str, destination: str, mood: str = "") -> str:
 
     try:
         route = get_drive_route_summary(origin, destination)
-        rec = recommend_drive_music_for_trip(destination, route.duration_minutes, mood)
-        playback = play_playlist(rec.playlist_uri)
+        time_of_day = _get_time_of_day()
+        rec = recommend_drive_music_for_trip(
+            destination, route.duration_minutes, mood, time_of_day,
+        )
+        playback = _play_recommendation(rec)
         route_info = (
             f"Route: {route.origin} -> {route.destination}\n"
             f"Distance: {route.distance_text}, Time: {route.duration_text}"
         )
         recommendation = f"Recommendation: {rec.description} ({rec.genre})"
     except MapsError as exc:
-        # Route lookup fails: still open apps and fall back to destination-based recommendation.
         rec = recommend_drive_music(destination, mood)
-        playback = play_playlist(rec.playlist_uri)
+        playback = _play_recommendation(rec)
         route_info = f"Route lookup failed: {exc}"
         recommendation = f"Fallback recommendation: {rec.description} ({rec.genre})"
 
@@ -371,7 +426,7 @@ def task_music(task: str, motivation: str = "") -> str:
     Use this when the user wants music for working or an activity.
     """
     rec = recommend_task_music(task, motivation)
-    result = play_playlist(rec.playlist_uri)
+    result = _play_recommendation(rec)
     return f"{rec.description} ({rec.genre})\n{result}"
 
 
@@ -410,7 +465,7 @@ def mood_music(mood: str) -> str:
     Mood examples: high, low, neutral, stressed, excited.
     """
     rec = recommend_for_motivation(mood)
-    result = play_playlist(rec.playlist_uri)
+    result = _play_recommendation(rec)
     return f"{rec.description} ({rec.genre})\n{result}"
 
 
@@ -435,12 +490,13 @@ def search_music(query: str) -> str:
     """Search and play music by artist name, song title, or any query.
 
     This is the main tool for specific requests like:
-    - "Play Zutomayo" → searches for the artist and plays their music
-    - "Play KICK BACK by Kenshi Yonezu" → finds and plays that exact song
-    - "Play chill jazz playlist" → finds a matching playlist
+    - "Play Zutomayo" -> searches for the artist and plays their music
+    - "Play KICK BACK by Kenshi Yonezu" -> finds and plays that exact song
+    - "Play chill jazz playlist" -> finds a matching playlist
 
     Use this whenever the user asks for a specific artist, song, or genre.
     """
+    logger.info(f"TOOL CALLED: search_music(query={query})")
     return search_and_play_auto(query)
 
 
@@ -505,59 +561,38 @@ def search_spotify_playlists_web(query: str, limit: int = 8) -> str:
 
     lines = []
     for i, item in enumerate(results, start=1):
-        lines.append(f"{i}. {item.name} / {item.owner} / {item.uri}")
+        name = item.get("name", "Unknown")
+        owner = item.get("owner", "Unknown")
+        total = item.get("tracks_total", "?")
+        uri = item.get("uri", "")
+        lines.append(f"{i}. {name} (by {owner}, {total} tracks)\n   {uri}")
     return "\n".join(lines)
 
 
 @mcp.tool()
-def playlist_selection_prompt(query: str, limit: int = 8, mood: str = "") -> str:
-    """Build the Anthropic prompt used to pick one playlist from Spotify search candidates."""
+def smart_playlist_search(query: str, mood: str = "") -> str:
+    """Search playlists via Web API and optionally let Anthropic pick the best match."""
     try:
-        results = search_spotify_playlists(query=query, limit=limit)
-    except SpotifySearchError as exc:
-        return f"Spotify search failed: {exc}"
-
-    candidates = [item.to_dict() for item in results]
-    if not candidates:
-        return f'No playlists found for "{query}"'
-    return build_playlist_selection_prompt(query, candidates, mood)
-
-
-@mcp.tool()
-def play_by_natural_query(query: str, mood: str = "", limit: int = 8) -> str:
-    """Search Spotify playlists, let Anthropic choose the best one, and play it."""
-    try:
-        results = search_spotify_playlists(query=query, limit=limit)
+        results = search_spotify_playlists(query=query, limit=10)
     except SpotifySearchError as exc:
         return f"Spotify search failed: {exc}"
 
     if not results:
         return f'No playlists found for "{query}"'
 
-    candidates = [item.to_dict() for item in results]
     try:
-        selected_uri, selected_name, reason = choose_playlist_with_anthropic(
-            query=query,
-            candidates=candidates,
-            mood=mood,
+        chosen = choose_playlist_with_anthropic(
+            results, mood=mood or "general listening"
         )
-    except AnthropicSelectionError as exc:
-        # Fallback to first result if Anthropic selection is unavailable.
-        fallback = results[0]
-        playback = play_playlist(fallback.uri)
-        return (
-            f'Anthropic selection failed: {exc}\n'
-            f'Fallback: {fallback.name} / {fallback.owner}\n'
-            f"{playback}"
-        )
+    except AnthropicSelectionError:
+        chosen = results[0]
 
-    playback = play_playlist(selected_uri)
-    return (
-        f'Selected playlist: {selected_name}\n'
-        f"URI: {selected_uri}\n"
-        f"Reason: {reason}\n"
-        f"{playback}"
-    )
+    uri = chosen.get("uri", "")
+    name = chosen.get("name", "Unknown")
+    if not uri:
+        return "Could not determine playlist URI"
+    result = play_playlist(uri)
+    return f"Selected: {name}\n{result}"
 
 
 # =========================================================================
