@@ -5,11 +5,21 @@ VoiceOS からの音声コマンドで Spotify を操作し、
 """
 
 import subprocess
+import sys
+import logging
 from urllib.parse import urlencode
 import os
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+# ログ設定: 全ツール呼び出しを記録
+logging.basicConfig(
+    filename=os.path.join(os.path.dirname(__file__), "dj_server.log"),
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("davadava")
 
 from mcp.server.fastmcp import FastMCP
 
@@ -102,6 +112,7 @@ def _open_google_maps_directions(origin: str, destination: str) -> str:
 
 def _play_recommendation(rec) -> str:
     """Recommendation の内容に応じて再生する共通ヘルパー。"""
+    logger.info(f"_play_recommendation called: genre={rec.genre}, uri={rec.playlist_uri}, tracks={len(rec.tracks)}")
     if rec.tracks:
         from spotify import osascript
         import time as _time
@@ -119,6 +130,7 @@ def _play_recommendation(rec) -> str:
 @mcp.tool()
 def resume_playback() -> str:
     """Resume playing music. Use when asked to play or continue music."""
+    logger.info("TOOL CALLED: resume_playback()")
     return play()
 
 
@@ -137,6 +149,7 @@ def toggle_play_pause() -> str:
 @mcp.tool()
 def next_song() -> str:
     """Skip to the next song."""
+    logger.info("TOOL CALLED: next_song()")
     return next_track()
 
 
@@ -228,6 +241,7 @@ def drive_music(destination: str, mood: str = "") -> str:
     Uses your Spotify listening history to personalize recommendations.
     Also considers the current time of day (night -> chill, morning -> fresh).
     """
+    logger.info(f"TOOL CALLED: drive_music(destination={destination}, mood={mood})")
     time_of_day = _get_time_of_day()
     if time_of_day == "night" and destination not in ("night_drive", "date"):
         destination = "night_drive"
@@ -482,6 +496,7 @@ def search_music(query: str) -> str:
 
     Use this whenever the user asks for a specific artist, song, or genre.
     """
+    logger.info(f"TOOL CALLED: search_music(query={query})")
     return search_and_play_auto(query)
 
 
