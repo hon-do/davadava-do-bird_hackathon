@@ -52,6 +52,21 @@ Spotify 認証:
 python3 src/setup_spotify.py
 ```
 
+Anthropicで移動時間推定を使う場合:
+
+```bash
+export ANTHROPIC_API_KEY="YOUR_ANTHROPIC_API_KEY"
+# 任意
+export ANTHROPIC_MODEL="claude-3-5-sonnet-latest"
+```
+
+Spotify Web APIで検索を使う場合:
+
+```bash
+export SPOTIFY_CLIENT_ID="YOUR_SPOTIFY_CLIENT_ID"
+export SPOTIFY_CLIENT_SECRET="YOUR_SPOTIFY_CLIENT_SECRET"
+```
+
 ## VoiceOS への接続
 
 1. VoiceOS を開く
@@ -64,6 +79,20 @@ python3 /path/to/davadava/src/dj_server.py
 
 ## アーキテクチャ
 
+| 話しかけ方 | 実行される機能 |
+|-----------|--------------|
+| 「海に向かうからいい曲かけて」 | ビーチドライブ向け選曲 |
+| 「渋谷から横浜までドライブセッション開始して」 | Spotify起動 + Googleマップ起動 + ルート時間連動で再生 |
+| 「渋谷から横浜までの時間を見て、合う曲を流して」 | ルート距離/時間を取得して最適プレイリスト再生 |
+| 「渋谷から箱根まで80kmくらい。時間を予測して合う曲かけて」 | Anthropicで所要時間を推定して最適プレイリスト再生 |
+| 「夜のドライブに合う曲」 | 夜ドライブ向けの lo-fi / R&B |
+| 「集中したいから作業用BGM流して」 | 集中向け lo-fi / ambient |
+| 「テンション上げたい」 | ハイエネルギーな曲 |
+| 「プレイリスト Chill Hits を流して」 | ライブラリ内のプレイリスト名で直接再生 |
+| 「ずっと真夜中でいいのに。のプレイリスト探して流して」 | Spotify検索 + Anthropic選定で再生 |
+| 「次の曲」 | スキップ |
+| 「音量下げて」 | 音量調整 |
+| 「今なんの曲?」 | 曲情報を返答 |
 ```
 音声 → VoiceOS → MCP Server (dj_server.py)
                     ├── Google Maps API → ルート計算・場所判定
@@ -74,3 +103,23 @@ python3 /path/to/davadava/src/dj_server.py
 ## ドキュメント
 
 - [VoiceOS MCP できること一覧](docs/voiceos-mcp-overview.md)
+
+## Anthropic向け時間予測プロンプト（実装済み）
+
+`anthropic_eta_prompt(origin, destination, distance_km, departure_context)` で確認可能。
+
+要点:
+- 出発地 / 目的地 / 距離(km) / 補足コンテキストを渡す
+- 都市部・郊外推定、渋滞ゆらぎ込みでレンジ予測
+- 返却形式を厳密JSONに固定
+
+期待するJSON:
+```json
+{
+  "minutes_low": 55,
+  "minutes_mid": 75,
+  "minutes_high": 105,
+  "confidence": "medium",
+  "rationale": "夕方の都心流入で混雑しやすく、平均速度が落ちるため"
+}
+```

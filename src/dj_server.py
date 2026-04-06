@@ -4,6 +4,8 @@ VoiceOS からの音声コマンドで Spotify を操作し、
 タスク・モチベーション・ドライブの目的地に応じた曲を推薦・再生する。
 """
 
+import subprocess
+from urllib.parse import urlencode
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -19,6 +21,7 @@ from spotify import (
     prev_track,
     play_uri,
     play_playlist,
+    play_playlist_by_name,
     current_track_summary,
     set_volume,
     get_volume,
@@ -40,9 +43,22 @@ from recommender import (
     recommend_for_motivation,
 )
 from maps import get_drive_route_summary, MapsError
+from anthropic_eta import (
+    AnthropicETAError,
+    AnthropicSelectionError,
+    build_eta_prompt,
+    build_playlist_selection_prompt,
+    choose_playlist_with_anthropic,
+    estimate_drive_time_with_anthropic,
+)
+from spotify_web import search_spotify_playlists, SpotifySearchError
 
 mcp = FastMCP("davadava-dj")
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _get_time_of_day() -> str:
     """現在の時間帯を返す。"""
@@ -55,6 +71,45 @@ def _get_time_of_day() -> str:
         return "evening"
     else:
         return "night"
+
+
+def _open_spotify_app() -> str:
+    """Launch Spotify app on macOS."""
+    try:
+        subprocess.run(["open", "-a", "Spotify"], check=True, capture_output=True, text=True)
+        return "Spotify opened"
+    except Exception as exc:
+        return f"Spotify open failed: {exc}"
+
+
+def _open_google_maps_directions(origin: str, destination: str) -> str:
+    """Open browser Google Maps directions page."""
+    params = urlencode(
+        {
+            "api": 1,
+            "origin": origin,
+            "destination": destination,
+            "travelmode": "driving",
+        }
+    )
+    url = f"https://www.google.com/maps/dir/?{params}"
+    try:
+        subprocess.run(["open", url], check=True, capture_output=True, text=True)
+        return f"Google Maps opened: {url}"
+    except Exception as exc:
+        return f"Google Maps open failed: {exc}"
+
+
+def _play_recommendation(rec) -> str:
+    """Recommendation の内容に応じて再生する共通ヘルパー。"""
+    if rec.tracks:
+        from spotify import osascript
+        import time as _time
+        osascript(f'play track "{rec.tracks[0]["uri"]}"')
+        _time.sleep(1)
+        return current_track_summary()
+    else:
+        return play_playlist(rec.playlist_uri)
 
 
 # =========================================================================
@@ -171,30 +226,14 @@ def drive_music(destination: str, mood: str = "") -> str:
     Mood examples: high, low, neutral, stressed, excited.
 
     Uses your Spotify listening history to personalize recommendations.
-    Also considers the current time of day (night → chill, morning → fresh).
+    Also considers the current time of day (night -> chill, morning -> fresh).
     """
     time_of_day = _get_time_of_day()
-
-    # 夜間は自動的に night_drive の雰囲気を加味
     if time_of_day == "night" and destination not in ("night_drive", "date"):
         destination = "night_drive"
 
     rec = recommend_drive_music(destination, mood, time_of_day)
-
-    # Recommendations API がトラックを返した場合は直接再生
-    if rec.tracks:
-        result = play_recommended_tracks(
-            seed_genres=None, seed_artists=None, seed_tracks=None,
-            # play_recommended_tracks を直接呼ばず、rec.tracksの最初を再生
-        )
-        from spotify import osascript, current_track_summary
-        import time as _time
-        osascript(f'play track "{rec.tracks[0]["uri"]}"')
-        _time.sleep(1)
-        result = current_track_summary()
-    else:
-        result = play_playlist(rec.playlist_uri)
-
+    result = _play_recommendation(rec)
     return f"{rec.description} ({rec.genre})\n{result}"
 
 
@@ -250,22 +289,112 @@ def drive_music_with_route(origin: str, destination: str, mood: str = "") -> str
     rec = recommend_drive_music_for_trip(
         destination, route.duration_minutes, mood, time_of_day,
     )
-
-    # トラック推薦の場合は直接再生
-    if rec.tracks:
-        from spotify import osascript, current_track_summary
-        import time as _time
-        osascript(f'play track "{rec.tracks[0]["uri"]}"')
-        _time.sleep(1)
-        result = current_track_summary()
-    else:
-        result = play_playlist(rec.playlist_uri)
-
+    result = _play_recommendation(rec)
     return (
         f"Route: {route.origin} -> {route.destination}\n"
         f"Distance: {route.distance_text}, Time: {route.duration_text}\n"
         f"Recommendation: {rec.description} ({rec.genre})\n"
         f"{result}"
+    )
+
+
+@mcp.tool()
+def anthropic_eta_prompt(
+    origin: str,
+    destination: str,
+    distance_km: float,
+    departure_context: str = "",
+) -> str:
+    """Build the prompt used for Anthropic-based travel time estimation."""
+    return build_eta_prompt(origin, destination, distance_km, departure_context)
+
+
+@mcp.tool()
+def predict_drive_time_with_anthropic(
+    origin: str,
+    destination: str,
+    distance_km: float,
+    departure_context: str = "",
+) -> str:
+    """Estimate drive time via Anthropic API using ANTHROPIC_API_KEY."""
+    try:
+        estimate, _ = estimate_drive_time_with_anthropic(
+            origin=origin,
+            destination=destination,
+            distance_km=distance_km,
+            departure_context=departure_context,
+        )
+    except AnthropicETAError as exc:
+        return f"ETA prediction failed: {exc}"
+
+    return (
+        f"Predicted ETA: {estimate.minutes_mid} min "
+        f"(range {estimate.minutes_low}-{estimate.minutes_high} min)\n"
+        f"Confidence: {estimate.confidence}\n"
+        f"Rationale: {estimate.rationale}"
+    )
+
+
+@mcp.tool()
+def drive_music_with_predicted_time(
+    origin: str,
+    destination: str,
+    distance_km: float,
+    mood: str = "",
+    departure_context: str = "",
+) -> str:
+    """Predict drive time via Anthropic and play a playlist matched to the predicted trip length."""
+    try:
+        estimate, _ = estimate_drive_time_with_anthropic(
+            origin=origin,
+            destination=destination,
+            distance_km=distance_km,
+            departure_context=departure_context,
+        )
+    except AnthropicETAError as exc:
+        return f"ETA prediction failed: {exc}"
+
+    rec = recommend_drive_music_for_trip(destination, estimate.minutes_mid, mood)
+    result = _play_recommendation(rec)
+    return (
+        f"Prediction: {estimate.minutes_mid} min "
+        f"(range {estimate.minutes_low}-{estimate.minutes_high} min)\n"
+        f"Confidence: {estimate.confidence}\n"
+        f"Recommendation: {rec.description} ({rec.genre})\n"
+        f"{result}"
+    )
+
+
+@mcp.tool()
+def start_drive_session(origin: str, destination: str, mood: str = "") -> str:
+    """Open Spotify and Google Maps in one command, then play route-aware drive music."""
+    spotify_open = _open_spotify_app()
+    maps_open = _open_google_maps_directions(origin, destination)
+
+    try:
+        route = get_drive_route_summary(origin, destination)
+        time_of_day = _get_time_of_day()
+        rec = recommend_drive_music_for_trip(
+            destination, route.duration_minutes, mood, time_of_day,
+        )
+        playback = _play_recommendation(rec)
+        route_info = (
+            f"Route: {route.origin} -> {route.destination}\n"
+            f"Distance: {route.distance_text}, Time: {route.duration_text}"
+        )
+        recommendation = f"Recommendation: {rec.description} ({rec.genre})"
+    except MapsError as exc:
+        rec = recommend_drive_music(destination, mood)
+        playback = _play_recommendation(rec)
+        route_info = f"Route lookup failed: {exc}"
+        recommendation = f"Fallback recommendation: {rec.description} ({rec.genre})"
+
+    return (
+        f"{spotify_open}\n"
+        f"{maps_open}\n"
+        f"{route_info}\n"
+        f"{recommendation}\n"
+        f"{playback}"
     )
 
 
@@ -283,14 +412,7 @@ def task_music(task: str, motivation: str = "") -> str:
     Use this when the user wants music for working or an activity.
     """
     rec = recommend_task_music(task, motivation)
-    if rec.tracks:
-        from spotify import osascript, current_track_summary
-        import time as _time
-        osascript(f'play track "{rec.tracks[0]["uri"]}"')
-        _time.sleep(1)
-        result = current_track_summary()
-    else:
-        result = play_playlist(rec.playlist_uri)
+    result = _play_recommendation(rec)
     return f"{rec.description} ({rec.genre})\n{result}"
 
 
@@ -329,14 +451,7 @@ def mood_music(mood: str) -> str:
     Mood examples: high, low, neutral, stressed, excited.
     """
     rec = recommend_for_motivation(mood)
-    if rec.tracks:
-        from spotify import osascript, current_track_summary
-        import time as _time
-        osascript(f'play track "{rec.tracks[0]["uri"]}"')
-        _time.sleep(1)
-        result = current_track_summary()
-    else:
-        result = play_playlist(rec.playlist_uri)
+    result = _play_recommendation(rec)
     return f"{rec.description} ({rec.genre})\n{result}"
 
 
@@ -361,9 +476,9 @@ def search_music(query: str) -> str:
     """Search and play music by artist name, song title, or any query.
 
     This is the main tool for specific requests like:
-    - "Play Zutomayo" → searches for the artist and plays their music
-    - "Play KICK BACK by Kenshi Yonezu" → finds and plays that exact song
-    - "Play chill jazz playlist" → finds a matching playlist
+    - "Play Zutomayo" -> searches for the artist and plays their music
+    - "Play KICK BACK by Kenshi Yonezu" -> finds and plays that exact song
+    - "Play chill jazz playlist" -> finds a matching playlist
 
     Use this whenever the user asks for a specific artist, song, or genre.
     """
@@ -410,6 +525,59 @@ def play_spotify_uri(uri: str) -> str:
       spotify:playlist:37i9dQZF1DXcBWIGoYBM5M
     """
     return play_uri(uri)
+
+
+@mcp.tool()
+def play_spotify_playlist_by_name(name: str) -> str:
+    """Play a Spotify playlist by its name from your library."""
+    return play_playlist_by_name(name)
+
+
+@mcp.tool()
+def search_spotify_playlists_web(query: str, limit: int = 8) -> str:
+    """Search Spotify playlists via Web API (requires SPOTIFY_CLIENT_ID/SECRET)."""
+    try:
+        results = search_spotify_playlists(query=query, limit=limit)
+    except SpotifySearchError as exc:
+        return f"Spotify search failed: {exc}"
+
+    if not results:
+        return f'No playlists found for "{query}"'
+
+    lines = []
+    for i, item in enumerate(results, start=1):
+        name = item.get("name", "Unknown")
+        owner = item.get("owner", "Unknown")
+        total = item.get("tracks_total", "?")
+        uri = item.get("uri", "")
+        lines.append(f"{i}. {name} (by {owner}, {total} tracks)\n   {uri}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def smart_playlist_search(query: str, mood: str = "") -> str:
+    """Search playlists via Web API and optionally let Anthropic pick the best match."""
+    try:
+        results = search_spotify_playlists(query=query, limit=10)
+    except SpotifySearchError as exc:
+        return f"Spotify search failed: {exc}"
+
+    if not results:
+        return f'No playlists found for "{query}"'
+
+    try:
+        chosen = choose_playlist_with_anthropic(
+            results, mood=mood or "general listening"
+        )
+    except AnthropicSelectionError:
+        chosen = results[0]
+
+    uri = chosen.get("uri", "")
+    name = chosen.get("name", "Unknown")
+    if not uri:
+        return "Could not determine playlist URI"
+    result = play_playlist(uri)
+    return f"Selected: {name}\n{result}"
 
 
 # =========================================================================
